@@ -1,91 +1,62 @@
-name: 自动测速并更新Cloudflare DNS（稳定版）
+name: CF-DNS-Update-Emby
 on:
   schedule:
-    - cron: '*/30 * * * *'  # 每30分钟执行（UTC）
-  workflow_dispatch:  # 手动触发
+    - cron: '*/30 * * * *'  # 每30分钟执行（UTC时间）
+  workflow_dispatch:        # 手动触发（试运行用这个）
 
 jobs:
   update-dns:
     runs-on: ubuntu-latest
     steps:
-      - name: 获取下载速度最快且支持Emby的Cloudflare IP
-        id: get-fast-ip
-        run: |
-          # 开启严格错误处理（出错立即退出，方便定位）
-          set -euo pipefail
-          
-          # 快速安装必要工具（仅保留bc，移除npm/wscat/jq，减少依赖）
-          sudo apt update -y && sudo apt install -y bc
+      # 步骤1：安装唯一必要工具bc（极简）
+      - name: 安装基础工具
+        run: sudo apt update -y && sudo apt install -y bc || true
 
-          # 你的备用Cloudflare IP列表
+      # 步骤2：获取最快且支持Emby的CF IP（核心逻辑极简）
+      - name: 筛选CF IP
+        id: get-ip
+        run: |
+          # 你的CF IP列表（保留少量稳定IP）
           ips=(
-            "172.64.42.0"
             "172.64.229.141"
             "162.159.58.102"
-            "172.64.151.95"
-            "162.159.61.225"
-            "108.162.196.35"
-            "162.159.46.151"
-            "162.159.41.38"
-            "172.64.146.223"
-            "172.64.147.176"
+            "172.64.42.0"
           )
-          fastest_ip=""
+          fastest_ip="172.64.229.141"  # 默认IP
           max_speed=0
-          EMBY_DOMAIN="gzxgzxgzx.de5.net"  # 你的反代域名
-          EMBY_API_PATH="/emby/System/Info/Public"
-          # 改用Cloudflare官方测速文件（更稳定，适配CF IP）
-          TEST_FILE_URL="https://speed.cloudflare.com/__down?bytes=10485760"
-          TEST_DOMAIN="speed.cloudflare.com"
+          EMBY_DOMAIN="gzxgzxgzx.de5.net"
 
-          # 循环测试IP：先验证Emby，再测速
+          # 循环测试IP
           for ip in "${ips[@]}"; do
-            echo "========== 测试IP: $ip =========="
-            emby_support="false"
-
-            # 验证Emby（仅用curl，移除wscat，避免npm依赖）
-            echo "验证Emby支持性..."
+            echo "测试IP: $ip"
+            # 1. 验证是否支持Emby（仅用curl，无复杂判断）
             if curl -s --connect-timeout 5 --max-time 10 \
               --resolve "$EMBY_DOMAIN:443:$ip" \
-              "https://$EMBY_DOMAIN$EMBY_API_PATH" > /dev/null; then
+              "https://$EMBY_DOMAIN/emby/System/Info/Public" > /dev/null; then
               echo "IP $ip 支持Emby"
-              emby_support="true"
-            else
-              echo "IP $ip 不支持Emby，跳过"
-              continue
-            fi
-
-            # 测速（用CF官方文件，更稳定）
-            if [ "$emby_support" = "true" ]; then
-              echo "测试下载速度..."
+              # 2. 测速（用CF官方5MB文件，极简）
               speed=$(curl -o /dev/null -s -w "%{speed_download}" \
-                --connect-timeout 5 --max-time 15 \
-                --resolve "$TEST_DOMAIN:443:$ip" \
-                "$TEST_FILE_URL" || echo 0)
-              speed_mb=$(echo "scale=2; $speed / 1024 / 1024" | bc)
-              echo "IP $ip 速度: $speed_mb MB/s"
-
+                --connect-timeout 5 --max-time 10 \
+                "http://speed.cloudflare.com/__down?bytes=5242880" || echo 0)
+              # 记录最快IP
               if (( $(echo "$speed > $max_speed" | bc -l) )); then
                 max_speed=$speed
                 fastest_ip=$ip
               fi
+            else
+              echo "IP $ip 不支持Emby，跳过"
             fi
           done
 
-          # 兜底逻辑
-          fastest_ip=${fastest_ip:-"172.64.229.141"}
           echo "fast_ip=$fastest_ip" >> $GITHUB_OUTPUT
           echo "选中IP: $fastest_ip"
 
-      - name: 更新Cloudflare DNS记录
+      # 步骤3：更新Cloudflare DNS（单行JSON，无格式坑）
+      - name: 更新DNS记录
         run: |
-          set -euo pipefail
-          # 简化curl命令，避免Here Document的格式坑
+          # 调用CF API更新DNS（极简版）
           curl -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
             -H "Authorization: Bearer ${{ secrets.CF_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{\"type\":\"A\",\"name\":\"gzxgzxgzx.de5.net\",\"content\":\"${{ steps.get-fast-ip.outputs.fast_ip }}\",\"ttl\":1,\"proxied\":true}"
-          echo "DNS更新完成: ${{ steps.get-fast-ip.outputs.fast_ip }}"
-          }
-EOF
-          echo "DNS记录已更新为：${{ steps.get-fast-ip.outputs.fast_ip }}"
+            -d "{\"type\":\"A\",\"name\":\"gzxgzxgzx.de5.net\",\"content\":\"${{ steps.get-ip.outputs.fast_ip }}\",\"ttl\":1,\"proxied\":true}"
+          echo "DNS已更新为: ${{ steps.get-ip.outputs.fast_ip }}"
