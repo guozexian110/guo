@@ -1,33 +1,55 @@
 name: 自动测速并更新Cloudflare DNS
 on:
   schedule:
-    - cron: '0 * * * *'  # 每小时执行一次（UTC时间）
+    - cron: '0 * * * *'  # 每小时执行一次（UTC时间，对应北京时间+8）
   workflow_dispatch:  # 允许手动触发
 
 jobs:
   update-dns:
     runs-on: ubuntu-latest
     steps:
-      - name: 获取最快Cloudflare IP
+      - name: 获取下载速度最快的Cloudflare IP
         id: get-fast-ip
         run: |
-          ips=("1.1.1.1" "1.0.0.1" "172.64.155.1" "172.64.146.1")
-          min_delay=9999
-          fast_ip=""
+          # 定义要测试的Cloudflare IP列表（可根据需要添加/删减）
+          ips=("1.1.1.1" "1.0.0.1" "172.64.155.1" "172.64.146.1" "104.16.132.229" "104.16.133.229")
+          fastest_ip=""
+          max_speed=0
+
+          # 循环测试每个IP的下载速度（使用Cloudflare的10MB测速文件）
           for ip in "${ips[@]}"; do
-            delay=$(ping -c 3 -W 1 $ip | grep 'avg' | awk -F '/' '{print $5}')
-            if (( $(echo "$delay < $min_delay" | bc -l) )); then
-              min_delay=$delay
-              fast_ip=$ip
+            echo "测试IP: $ip"
+            # 使用curl测试下载速度（限制时间10秒，输出速度数据）
+            # 测速文件：Cloudflare的10MB测试文件（https://speed.cloudflare.com/__down?bytes=10485760）
+            speed=$(curl -o /dev/null -s -w "%{speed_download}" --connect-timeout 5 --max-time 10 "http://$ip/__down?bytes=10485760" || echo 0)
+            # 转换速度单位（字节/秒 → 千字节/秒，方便对比）
+            speed_kb=$(echo "scale=2; $speed / 1024" | bc)
+            echo "IP $ip 的下载速度: $speed_kb KB/s"
+
+            # 记录最快的IP
+            if (( $(echo "$speed > $max_speed" | bc -l) )); then
+              max_speed=$speed
+              fastest_ip=$ip
             fi
           done
-          echo "fast_ip=$fast_ip" >> $GITHUB_OUTPUT
+
+          # 输出最快IP（若所有IP测试失败，默认用1.1.1.1）
+          if [ -z "$fastest_ip" ]; then
+            fastest_ip="1.1.1.1"
+          fi
+          echo "fast_ip=$fastest_ip" >> $GITHUB_OUTPUT
+          echo "最快下载速度IP: $fastest_ip"
 
       - name: 更新Cloudflare DNS记录
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_TOKEN }}
-          command: |
-            wrangler dns record update ${{ secrets.CF_ZONE_ID }} ${{ secrets.CF_RECORD_ID }} \
-              --type A \
-              --content ${{ steps.get-fast-ip.outputs.fast_ip }}
+        run: |
+          # 调用Cloudflare API更新DNS记录（curl直接调用，无第三方依赖）
+          curl -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
+            -H "Authorization: Bearer ${{ secrets.CF_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "type": "A",
+              "name": "gzxgzxgzx.de5.net",
+              "content": "${{ steps.get-fast-ip.outputs.fast_ip }}",
+              "ttl": 1,
+              "proxied": false
+            }'
