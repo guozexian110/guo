@@ -1,4 +1,4 @@
-name: 自动测速并更新Cloudflare DNS（支持Emby验证，443端口）
+name: 自动测速并更新Cloudflare DNS（支持Emby 443端口验证）
 on:
   schedule:
     # 每30分钟执行一次（UTC时间，对应北京时间+8）
@@ -44,9 +44,8 @@ jobs:
           )
           fastest_ip=""
           max_speed=0
-          # 你的Emby核心配置（替换为你自己的信息，端口改为443）
+          # 你的Emby核心配置（确认是你的反代域名即可，无需修改其他）
           EMBY_DOMAIN="gzxgzxgzx.de5.net"  # 你的反代域名
-          # 注意：这里改为443端口（CF反代默认HTTPS端口，无需写8443）
           EMBY_API_PATH="/emby/System/Info/Public"  # Emby公开信息接口（无需认证）
 
           # 循环测试每个IP：先验证Emby兼容性，再测速
@@ -56,7 +55,7 @@ jobs:
             emby_support="false"
             # 验证1：测试IP能否通过反代域名（443端口）连接Emby公开接口
             echo "正在验证IP $ip 是否支持Emby反代（443端口）..."
-            # 强制使用当前IP解析反代域名（443端口是HTTPS默认端口，无需显式指定）
+            # 强制使用当前IP解析反代域名（443端口是HTTPS默认端口）
             if curl -s --connect-timeout 5 --max-time 10 \
               --resolve "$EMBY_DOMAIN:443:$ip" \
               "https://$EMBY_DOMAIN$EMBY_API_PATH" > /dev/null; then
@@ -102,18 +101,17 @@ jobs:
 
       - name: 更新Cloudflare DNS记录
         run: |
-          # 调用Cloudflare API更新DNS记录
+          # 使用Here Document方式构造JSON（避免格式错误，移除注释）
           curl -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
             -H "Authorization: Bearer ${{ secrets.CF_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{
-              "type": "A",
-              "name": "gzxgzxgzx.de5.net",
-              "content": "${{ steps.get-fast-ip.outputs.fast_ip }}",
-              "ttl": 1,  # Cloudflare自动TTL
-              "proxied": true  # 开启CF代理（橙色云朵，Emby反代必需，443端口依赖此）
-            }'
+            -d @- <<EOF
+          {
+            "type": "A",
+            "name": "gzxgzxgzx.de5.net",
+            "content": "${{ steps.get-fast-ip.outputs.fast_ip }}",
+            "ttl": 1,
+            "proxied": true
+          }
+          EOF
           echo "DNS记录已更新为：${{ steps.get-fast-ip.outputs.fast_ip }}"
-              "ttl": 1,
-              "proxied": false
-            }'
