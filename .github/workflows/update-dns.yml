@@ -1,70 +1,76 @@
 name: CF-DNS-Update-Emby
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+    - cron: '*/30 * * * *'  # 每30分钟执行（UTC时间）
+  workflow_dispatch:        # 手动触发试运行
 
 jobs:
   update-dns:
     runs-on: ubuntu-latest
     steps:
-      - name: 安装基础工具
+      - name: 安装基础工具（bc用于数值计算）
         run: sudo apt update -y && sudo apt install -y bc || true
 
-      - name: 筛选CF IP（显示测速数据）
+      - name: 筛选最快且支持Emby的CF IP（显示测速数据）
         id: get-ip
         run: |
-          # 你的CF IP列表
+          # 你的CF IP列表（保留少量稳定IP）
           ips=(
             "172.64.229.141"
             "162.159.58.102"
             "172.64.42.0"
           )
-          fastest_ip="172.64.229.141"  # 默认IP
+          fastest_ip="172.64.229.141"  # 默认兜底IP
           max_speed=0
-          EMBY_DOMAIN="gzxgzxgzx.de5.net"
-          # 测速配置：CF官方5MB文件，绑定测速域名
+          EMBY_DOMAIN="gzxgzxgzx.de5.net"  # 你的Emby反代域名
+          
+          # 测速配置（CF官方5MB文件，确保网络稳定）
           TEST_DOMAIN="speed.cloudflare.com"
-          TEST_FILE="https://${TEST_DOMAIN}/__down?bytes=5242880"  # 5MB
+          TEST_FILE="https://${TEST_DOMAIN}/__down?bytes=5242880"  # 5MB=5242880字节
 
+          # 循环测试每个IP
           for ip in "${ips[@]}"; do
             echo "==== 测试IP: $ip ===="
-            # 1. 验证是否支持Emby
-            if curl -s --connect-timeout 5 --max-time 10 \
-              --resolve "$EMBY_DOMAIN:443:$ip" \
-              "https://$EMBY_DOMAIN/emby/System/Info/Public" > /dev/null; then
-              echo "→ Emby：支持"
-              
-              # 2. 精准测速（绑定CF IP到测速域名，确保测的是目标IP）
-              speed=$(curl -o /dev/null -s -w "%{speed_download}" \
-                --connect-timeout 5 --max-time 10 \
-                --resolve "$TEST_DOMAIN:443:$ip" \  # 关键：绑定IP和测速域名
-                "$TEST_FILE" || echo 0)
-              
-              # 3. 转换为MB/s，并打印测速数据（核心：显示数据）
-              speed_mb=$(echo "scale=2; $speed / 1024 / 1024" | bc)
-              echo "→ 测速速度：$speed_mb MB/s（原始速度：$speed 字节/秒）"
-              
-              # 4. 对比速度，更新最快IP
-              if (( $(echo "$speed > $max_speed" | bc -l) )); then
-                max_speed=$speed
-                fastest_ip=$ip
-                echo "→ 暂选为最快IP（速度超过之前的最大值）"
-              fi
-            else
+            # 步骤1：验证IP是否支持Emby（强制绑定IP解析域名）
+            emby_check=$(curl -s --connect-timeout 5 --max-time 10 \
+              --resolve "${EMBY_DOMAIN}:443:${ip}" \
+              "https://${EMBY_DOMAIN}/emby/System/Info/Public" > /dev/null; echo $?)
+            
+            if [ "$emby_check" -ne 0 ]; then
               echo "→ Emby：不支持，跳过"
               continue
             fi
+            echo "→ Emby：支持"
+
+            # 步骤2：精准测速（修复curl语法，用引号包裹参数避免解析错误）
+            # 核心：--resolve参数放在URL前，所有变量用{}包裹，URL用引号包裹
+            speed=$(curl -o /dev/null -s -w "%{speed_download}" \
+              --connect-timeout 5 --max-time 10 \
+              --resolve "${TEST_DOMAIN}:443:${ip}" \
+              "${TEST_FILE}" || echo 0)
+
+            # 步骤3：转换速度单位（字节/秒 → MB/s，保留2位小数）
+            speed_mb=$(echo "scale=2; $speed / 1024 / 1024" | bc)
+            echo "→ 测速速度：$speed_mb MB/s（原始速度：$speed 字节/秒）"
+
+            # 步骤4：对比速度，更新最快IP
+            if (( $(echo "$speed > $max_speed" | bc -l) )); then
+              max_speed=$speed
+              fastest_ip=$ip
+              echo "→ 暂选为最快IP（速度超过之前最大值）"
+            fi
           done
 
+          # 输出最终结果
           echo "==== 最终结果 ===="
           echo "选中最快IP：$fastest_ip"
           echo "fast_ip=$fastest_ip" >> $GITHUB_OUTPUT
 
-      - name: 更新DNS记录
+      - name: 更新Cloudflare DNS记录
         run: |
+          # 调用CF API更新DNS（单行JSON避免格式错误）
           curl -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
             -H "Authorization: Bearer ${{ secrets.CF_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d "{\"type\":\"A\",\"name\":\"gzxgzxgzx.de5.net\",\"content\":\"${{ steps.get-ip.outputs.fast_ip }}\",\"ttl\":1,\"proxied\":true}"
-          echo "DNS已更新为: ${{ steps.get-ip.outputs.fast_ip }}"
+          echo "DNS记录已更新为：${{ steps.get-ip.outputs.fast_ip }}"
