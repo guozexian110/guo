@@ -1,4 +1,4 @@
-name: 自动测速并更新Cloudflare DNS（支持Emby 443端口验证）
+name: 自动测速并更新Cloudflare DNS（支持Emby 443端口验证，修复测速为0问题）
 on:
   schedule:
     # 每30分钟执行一次（UTC时间，对应北京时间+8）
@@ -12,6 +12,9 @@ jobs:
       - name: 获取下载速度最快且支持Emby的Cloudflare IP
         id: get-fast-ip
         run: |
+          # 安装必要工具（bc用于数值计算，jq用于JSON解析，ping用于连通性测试）
+          sudo apt update && sudo apt install -y bc jq iputils-ping
+          
           # 你的备用Cloudflare IP列表
           ips=(
             "172.64.42.0"
@@ -44,9 +47,12 @@ jobs:
           )
           fastest_ip=""
           max_speed=0
-          # 你的Emby核心配置（确认是你的反代域名即可，无需修改其他）
+          # 你的Emby核心配置（确认是你的反代域名即可）
           EMBY_DOMAIN="gzxgzxgzx.de5.net"  # 你的反代域名
           EMBY_API_PATH="/emby/System/Info/Public"  # Emby公开信息接口（无需认证）
+          # 公共测速文件（10MB，阿里云CDN，稳定可用）
+          TEST_FILE_URL="https://cdn.aliyun.com/download/testfile_10mb.dat"
+          TEST_FILE_SIZE=10485760  # 10MB字节数
 
           # 循环测试每个IP：先验证Emby兼容性，再测速
           for ip in "${ips[@]}"; do
@@ -75,18 +81,23 @@ jobs:
               fi
             fi
 
-            # 步骤2：只有支持Emby的IP，才进行下载速度测试
+            # 步骤2：只有支持Emby的IP，才进行下载速度测试（改用公共CDN文件+IP绑定）
             if [ "$emby_support" = "true" ]; then
               echo "开始测试IP $ip 的下载速度..."
-              # 测试100MB文件的下载速度，适配大文件超时
+              # 方式：强制使用当前CF IP解析测速文件的域名，测试下载速度（模拟该IP的CDN速度）
+              # 提取测速文件的域名（比如cdn.aliyun.com）
+              TEST_DOMAIN=$(echo $TEST_FILE_URL | awk -F/ '{print $3}')
+              # 测试下载速度：绑定IP+域名，下载10MB文件，设置超时
               speed=$(curl -o /dev/null -s -w "%{speed_download}" \
-                --connect-timeout 5 --max-time 30 \
-                "http://$ip/__down?bytes=104857600" || echo 0)
+                --connect-timeout 5 --max-time 20 \
+                --resolve "$TEST_DOMAIN:443:$ip" \
+                "$TEST_FILE_URL" || echo 0)
+              
               # 转换为MB/s，更直观
               speed_mb=$(echo "scale=2; $speed / 1024 / 1024" | bc)
               echo "IP $ip 的下载速度: $speed_mb MB/s"
 
-              # 记录下载速度最快的IP
+              # 记录下载速度最快的IP（如果速度为0，跳过该IP的排名）
               if (( $(echo "$speed > $max_speed" | bc -l) )); then
                 max_speed=$speed
                 fastest_ip=$ip
@@ -94,7 +105,21 @@ jobs:
             fi
           done
 
-          # 兜底逻辑：如果所有IP都失败，使用默认IP（确保脚本不中断）
+          # 兜底逻辑1：如果测速后没有找到IP，用Emby验证通过的第一个IP
+          if [ -z "$fastest_ip" ]; then
+            echo "所有IP测速为0，选择第一个支持Emby的IP"
+            for ip in "${ips[@]}"; do
+              # 快速验证Emby支持性
+              if curl -s --connect-timeout 3 --max-time 5 \
+                --resolve "$EMBY_DOMAIN:443:$ip" \
+                "https://$EMBY_DOMAIN$EMBY_API_PATH" > /dev/null; then
+                fastest_ip=$ip
+                break
+              fi
+            done
+          fi
+
+          # 兜底逻辑2：如果还是没有，使用默认IP
           fastest_ip=${fastest_ip:-"172.64.229.141"}
           echo "fast_ip=$fastest_ip" >> $GITHUB_OUTPUT
           echo "本次选中的IP（最快且支持Emby 443端口）: $fastest_ip"
@@ -112,6 +137,9 @@ jobs:
             "content": "${{ steps.get-fast-ip.outputs.fast_ip }}",
             "ttl": 1,
             "proxied": true
+          }
+          EOF
+          echo "DNS记录已更新为：${{ steps.get-fast-ip.outputs.fast_ip }}"
           }
           EOF
           echo "DNS记录已更新为：${{ steps.get-fast-ip.outputs.fast_ip }}"
