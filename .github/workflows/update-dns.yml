@@ -8,41 +8,66 @@ jobs:
   update-dns:
     runs-on: ubuntu-latest
     steps:
-      - name: 获取下载速度最快的Cloudflare IP
+      - name: 获取下载速度最快的Cloudflare IP（备用IP列表）
         id: get-fast-ip
         run: |
-          # 定义要测试的Cloudflare IP列表（可根据需要添加/删减）
-          ips=("1.1.1.1" "1.0.0.1" "172.64.155.1" "172.64.146.1" "104.16.132.229" "104.16.133.229")
+          # 你的备用Cloudflare IP列表（已去重并整理）
+          ips=(
+            "172.64.42.0"
+            "172.64.229.141"
+            "162.159.58.102"
+            "172.64.151.95"
+            "162.159.61.225"
+            "108.162.196.35"
+            "162.159.46.151"
+            "162.159.41.38"
+            "172.64.146.223"
+            "172.64.147.176"
+            "162.159.40.235"
+            "172.64.229.166"
+            "162.159.49.16"
+            "162.159.58.200"
+            "172.64.156.225"
+            "172.64.151.49"
+            "162.159.40.50"
+            "108.162.194.37"
+            "172.64.49.55"
+            "162.159.41.172"
+            "172.64.229.241"
+            "162.159.40.171"
+            "162.159.61.226"
+            "172.64.48.117"
+            "172.64.32.230"
+            "162.159.43.213"
+            "172.64.49.16"
+          )
           fastest_ip=""
           max_speed=0
 
-          # 循环测试每个IP的下载速度（使用Cloudflare的10MB测速文件）
+          # 循环测试每个IP的下载速度（5MB文件，缩短超时提升效率）
           for ip in "${ips[@]}"; do
-            echo "测试IP: $ip"
-            # 使用curl测试下载速度（限制时间10秒，输出速度数据）
-            # 测速文件：Cloudflare的10MB测试文件（https://speed.cloudflare.com/__down?bytes=10485760）
-            speed=$(curl -o /dev/null -s -w "%{speed_download}" --connect-timeout 5 --max-time 10 "http://$ip/__down?bytes=10485760" || echo 0)
-            # 转换速度单位（字节/秒 → 千字节/秒，方便对比）
+            echo "开始测试IP: $ip"
+            # 测试5MB文件的下载速度，设置3秒连接超时、8秒最大耗时
+            speed=$(curl -o /dev/null -s -w "%{speed_download}" --connect-timeout 3 --max-time 8 "http://$ip/__down?bytes=5242880" || echo 0)
+            # 转换为KB/s，方便查看
             speed_kb=$(echo "scale=2; $speed / 1024" | bc)
             echo "IP $ip 的下载速度: $speed_kb KB/s"
 
-            # 记录最快的IP
+            # 记录下载速度最快的IP
             if (( $(echo "$speed > $max_speed" | bc -l) )); then
               max_speed=$speed
               fastest_ip=$ip
             fi
           done
 
-          # 输出最快IP（若所有IP测试失败，默认用1.1.1.1）
-          if [ -z "$fastest_ip" ]; then
-            fastest_ip="1.1.1.1"
-          fi
+          # 兜底逻辑：如果所有IP测试失败，默认使用172.64.229.141
+          fastest_ip=${fastest_ip:-"172.64.229.141"}
           echo "fast_ip=$fastest_ip" >> $GITHUB_OUTPUT
-          echo "最快下载速度IP: $fastest_ip"
+          echo "本次最快下载速度IP: $fastest_ip"
 
       - name: 更新Cloudflare DNS记录
         run: |
-          # 调用Cloudflare API更新DNS记录（curl直接调用，无第三方依赖）
+          # 调用Cloudflare API更新DNS记录（稳定的curl方案）
           curl -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
             -H "Authorization: Bearer ${{ secrets.CF_TOKEN }}" \
             -H "Content-Type: application/json" \
