@@ -1,4 +1,4 @@
-name: 自动测速并更新Cloudflare DNS（支持Emby 443端口验证，修复测速为0问题）
+name: 自动测速并更新Cloudflare DNS（支持Emby 443端口验证，修复语法错误）
 on:
   schedule:
     # 每30分钟执行一次（UTC时间，对应北京时间+8）
@@ -126,7 +126,7 @@ jobs:
 
       - name: 更新Cloudflare DNS记录
         run: |
-          # 使用Here Document方式构造JSON（避免格式错误，移除注释）
+          # 修复：Here Document的EOF必须顶格，无缩进
           curl -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
             -H "Authorization: Bearer ${{ secrets.CF_TOKEN }}" \
             -H "Content-Type: application/json" \
@@ -138,8 +138,5 @@ jobs:
             "ttl": 1,
             "proxied": true
           }
-          EOF
-          echo "DNS记录已更新为：${{ steps.get-fast-ip.outputs.fast_ip }}"
-          }
-          EOF
+EOF
           echo "DNS记录已更新为：${{ steps.get-fast-ip.outputs.fast_ip }}"
