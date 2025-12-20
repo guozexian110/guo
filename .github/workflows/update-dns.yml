@@ -1,17 +1,18 @@
-name: 自动测速并更新Cloudflare DNS
+name: 自动测速并更新Cloudflare DNS（支持Emby验证，443端口）
 on:
   schedule:
-    - cron: '0 * * * *'  # 每小时执行一次（UTC时间，对应北京时间+8）
+    # 每30分钟执行一次（UTC时间，对应北京时间+8）
+    - cron: '*/30 * * * *'  
   workflow_dispatch:  # 允许手动触发
 
 jobs:
   update-dns:
     runs-on: ubuntu-latest
     steps:
-      - name: 获取下载速度最快的Cloudflare IP（备用IP列表）
+      - name: 获取下载速度最快且支持Emby的Cloudflare IP
         id: get-fast-ip
         run: |
-          # 你的备用Cloudflare IP列表（已去重并整理）
+          # 你的备用Cloudflare IP列表
           ips=(
             "172.64.42.0"
             "172.64.229.141"
@@ -43,31 +44,65 @@ jobs:
           )
           fastest_ip=""
           max_speed=0
+          # 你的Emby核心配置（替换为你自己的信息，端口改为443）
+          EMBY_DOMAIN="gzxgzxgzx.de5.net"  # 你的反代域名
+          # 注意：这里改为443端口（CF反代默认HTTPS端口，无需写8443）
+          EMBY_API_PATH="/emby/System/Info/Public"  # Emby公开信息接口（无需认证）
 
-          # 循环测试每个IP的下载速度（5MB文件，缩短超时提升效率）
+          # 循环测试每个IP：先验证Emby兼容性，再测速
           for ip in "${ips[@]}"; do
-            echo "开始测试IP: $ip"
-            # 测试5MB文件的下载速度，设置3秒连接超时、8秒最大耗时
-            speed=$(curl -o /dev/null -s -w "%{speed_download}" --connect-timeout 3 --max-time 8 "http://$ip/__down?bytes=5242880" || echo 0)
-            # 转换为KB/s，方便查看
-            speed_kb=$(echo "scale=2; $speed / 1024" | bc)
-            echo "IP $ip 的下载速度: $speed_kb KB/s"
+            echo "========== 测试IP: $ip =========="
+            # 步骤1：验证该IP是否支持Emby（两个维度验证，基于443端口）
+            emby_support="false"
+            # 验证1：测试IP能否通过反代域名（443端口）连接Emby公开接口
+            echo "正在验证IP $ip 是否支持Emby反代（443端口）..."
+            # 强制使用当前IP解析反代域名（443端口是HTTPS默认端口，无需显式指定）
+            if curl -s --connect-timeout 5 --max-time 10 \
+              --resolve "$EMBY_DOMAIN:443:$ip" \
+              "https://$EMBY_DOMAIN$EMBY_API_PATH" > /dev/null; then
+              echo "IP $ip 支持Emby反代（接口可访问）"
+              emby_support="true"
+            else
+              # 验证2：备用方案：测试IP的443端口是否支持WebSocket（Emby必需的协议）
+              echo "正在验证IP $ip 的443端口是否支持WebSocket..."
+              # 使用wscat测试WebSocket连接（先安装wscat）
+              npm install -g wscat > /dev/null 2>&1
+              if wscat -n -w 2 "wss://$ip:443/embywebsocket" > /dev/null 2>&1; then
+                echo "IP $ip 支持WebSocket（443端口，Emby必需）"
+                emby_support="true"
+              else
+                echo "IP $ip 不支持Emby（443端口），跳过测速"
+                continue  # 不支持Emby，直接跳过该IP
+              fi
+            fi
 
-            # 记录下载速度最快的IP
-            if (( $(echo "$speed > $max_speed" | bc -l) )); then
-              max_speed=$speed
-              fastest_ip=$ip
+            # 步骤2：只有支持Emby的IP，才进行下载速度测试
+            if [ "$emby_support" = "true" ]; then
+              echo "开始测试IP $ip 的下载速度..."
+              # 测试100MB文件的下载速度，适配大文件超时
+              speed=$(curl -o /dev/null -s -w "%{speed_download}" \
+                --connect-timeout 5 --max-time 30 \
+                "http://$ip/__down?bytes=104857600" || echo 0)
+              # 转换为MB/s，更直观
+              speed_mb=$(echo "scale=2; $speed / 1024 / 1024" | bc)
+              echo "IP $ip 的下载速度: $speed_mb MB/s"
+
+              # 记录下载速度最快的IP
+              if (( $(echo "$speed > $max_speed" | bc -l) )); then
+                max_speed=$speed
+                fastest_ip=$ip
+              fi
             fi
           done
 
-          # 兜底逻辑：如果所有IP测试失败，默认使用172.64.229.141
+          # 兜底逻辑：如果所有IP都失败，使用默认IP（确保脚本不中断）
           fastest_ip=${fastest_ip:-"172.64.229.141"}
           echo "fast_ip=$fastest_ip" >> $GITHUB_OUTPUT
-          echo "本次最快下载速度IP: $fastest_ip"
+          echo "本次选中的IP（最快且支持Emby 443端口）: $fastest_ip"
 
       - name: 更新Cloudflare DNS记录
         run: |
-          # 调用Cloudflare API更新DNS记录（稳定的curl方案）
+          # 调用Cloudflare API更新DNS记录
           curl -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
             -H "Authorization: Bearer ${{ secrets.CF_TOKEN }}" \
             -H "Content-Type: application/json" \
@@ -75,6 +110,10 @@ jobs:
               "type": "A",
               "name": "gzxgzxgzx.de5.net",
               "content": "${{ steps.get-fast-ip.outputs.fast_ip }}",
+              "ttl": 1,  # Cloudflare自动TTL
+              "proxied": true  # 开启CF代理（橙色云朵，Emby反代必需，443端口依赖此）
+            }'
+          echo "DNS记录已更新为：${{ steps.get-fast-ip.outputs.fast_ip }}"
               "ttl": 1,
               "proxied": false
             }'
