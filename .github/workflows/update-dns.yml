@@ -1,0 +1,33 @@
+name: 自动测速并更新Cloudflare DNS
+on:
+  schedule:
+    - cron: '0 * * * *'  # 每小时执行一次（UTC时间）
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  update-dns:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 获取最快Cloudflare IP
+        id: get-fast-ip
+        run: |
+          ips=("1.1.1.1" "1.0.0.1" "172.64.155.1" "172.64.146.1")
+          min_delay=9999
+          fast_ip=""
+          for ip in "${ips[@]}"; do
+            delay=$(ping -c 3 -W 1 $ip | grep 'avg' | awk -F '/' '{print $5}')
+            if (( $(echo "$delay < $min_delay" | bc -l) )); then
+              min_delay=$delay
+              fast_ip=$ip
+            fi
+          done
+          echo "fast_ip=$fast_ip" >> $GITHUB_OUTPUT
+
+      - name: 更新Cloudflare DNS记录
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_TOKEN }}
+          command: |
+            wrangler dns record update ${{ secrets.CF_ZONE_ID }} ${{ secrets.CF_RECORD_ID }} \
+              --type A \
+              --content ${{ steps.get-fast-ip.outputs.fast_ip }}
