@@ -101,5 +101,5 @@ jobs:
           curl -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
             -H "Authorization: Bearer ${{ secrets.CF_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{\"type\":\"A\",\"name\":\"gzxgzxgzx.de5.net\",\"content\":\"${{ steps.get-ip.outputs.fast_ip }}\",\"ttl\":1,\"proxied\":true}"
+            -d "{\"type\":\"A\",\"name\":\"gzxgzxgzx.de5.net\",\"content\":\"${{ steps.get-ip.outputs.fast_ip }}\",\"ttl\":1,\"proxied\":false}"
           echo "DNS记录已更新为：${{ steps.get-ip.outputs.fast_ip }}"
