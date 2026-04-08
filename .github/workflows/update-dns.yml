@@ -11,10 +11,9 @@ jobs:
       - name: 安装依赖
         run: sudo apt update -y && sudo apt install -y bc
 
-      - name: 筛选【支持Emby+下载速度最快】的CF IP
+      - name: 筛选支持Emby + 下载速度最快的CF IP
         id: get-ip
         run: |
-          # 完整保留你的所有CF IP
           ips=(
             "172.64.149.222"
             "108.162.198.89"
@@ -68,68 +67,50 @@ jobs:
             "172.64.49.16"
           )
 
-          # 配置项（完全保留你的习惯）
-          fastest_ip="172.64.229.141"  # 兜底IP
+          fastest_ip="172.64.229.141"
           max_speed=0
-          EMBY_DOMAIN="gzxgzxgzx.de5.net"  # 你的Emby域名
-          MIN_SPEED_THRESHOLD=1  # 最低速度阈值（MB/s），可自行调整
+          EMBY_DOMAIN="gzxgzxgzx.de5.net"
 
-          # Cloudflare官方测速节点（永远稳定，不会404/超时）
-          TEST_URL="https://speed.cloudflare.com/__down?bytes=5242880"
-          TEST_HOST=$(echo $TEST_URL | awk -F/ '{print $3}')
-
-          # 循环测试每个IP（不会再全跳过）
           for ip in "${ips[@]}"; do
             echo "====================================="
             echo "测试IP：$ip"
 
-            # Emby可用性验证（修复后的逻辑，不会误判）
-            emby_response=$(curl -s -w "\n%{http_code}|%{exitcode}" -k --connect-timeout 8 --max-time 12 \
+            # 验证 Emby 可用性
+            curl -sf --connect-timeout 4 --max-time 8 \
               --resolve "$EMBY_DOMAIN:443:$ip" \
-              "https://$EMBY_DOMAIN/emby/System/Info/Public" 2>&1)
-            
-            http_code=$(echo "$emby_response" | tail -n1 | awk -F'|' '{print $1}')
-            exit_code=$(echo "$emby_response" | tail -n1 | awk -F'|' '{print $2}')
+              "https://$EMBY_DOMAIN/emby/System/Info/Public" > /dev/null
 
-            echo "Emby验证：退出码=$exit_code，HTTP状态码=$http_code"
-            
-            # 只要服务可达就算支持Emby
-            if [ "$exit_code" -ne 0 ] && ! [[ "$http_code" =~ ^(200|401|403)$ ]]; then
-              echo "❌ 不支持Emby，跳过"
+            if [ $? -ne 0 ]; then
+              echo "❌ 不支持 Emby，跳过"
               continue
             fi
-            echo "✅ 支持Emby，开始测速..."
 
-            # 下载速度测试（稳定不翻车）
+            echo "✅ 支持 Emby，开始测速..."
+
+            # 测速（5MB）
             speed=$(curl -o /dev/null -s -w "%{speed_download}" \
-              --connect-timeout 4 --max-time 8 \
-              --resolve "$TEST_HOST:443:$ip" \
-              "$TEST_URL" 2>/dev/null || echo 0)
-            speed_mb=$(echo "scale=2; $speed / 1024 / 1024" | bc 2>/dev/null || echo 0)
-            
-            # 速度不达标跳过
-            if (( $(echo "$speed_mb < $MIN_SPEED_THRESHOLD" | bc -l 2>/dev/null) )); then
-              echo "→ 速度不达标：$speed_mb MB/s，跳过"
-              continue
-            fi
+              --connect-timeout 4 --max-time 10 \
+              --resolve "speed.cloudflare.com:443:$ip" \
+              "https://speed.cloudflare.com/__down?bytes=5242880" || echo 0)
+
+            speed_mb=$(echo "scale=2; $speed / 1024 / 1024" | bc)
             echo "⚡ 下载速度：$speed_mb MB/s"
 
-            # 更新最快IP
-            if (( $(echo "$speed > $max_speed" | bc -l 2>/dev/null) )); then
+            # 选最快
+            if (( $(echo "$speed > $max_speed" | bc -l) )); then
               max_speed=$speed
               fastest_ip=$ip
               echo "🏆 成为当前最快IP"
             fi
           done
 
-          # 输出最终结果
           echo "====================================="
-          echo "最终选中最快IP：$fastest_ip"
+          echo "最终选中IP：$fastest_ip"
           echo "fast_ip=$fastest_ip" >> $GITHUB_OUTPUT
 
-      - name: 更新Cloudflare DNS记录
+      - name: 更新 Cloudflare DNS
         run: |
-          response=$(curl -s -w "\n%{http_code}" -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
+          curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
             -H "Authorization: Bearer ${{ secrets.CF_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
@@ -138,17 +119,5 @@ jobs:
               "content":"${{ steps.get-ip.outputs.fast_ip }}",
               "ttl":1,
               "proxied":false
-            }')
-          
-          http_code=$(echo "$response" | tail -n1)
-          body=$(echo "$response" | head -n -1)
-          
-          echo "DNS更新请求状态码：$http_code"
-          echo "返回结果：$body"
-          
-          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
-            echo "✅ DNS更新完成，当前解析IP：${{ steps.get-ip.outputs.fast_ip }}"
-          else
-            echo "⚠️ DNS更新请求异常"
-            exit 0
-          fi
+            }'
+          echo "✅ DNS 更新完成：${{ steps.get-ip.outputs.fast_ip }}"
