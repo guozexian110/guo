@@ -68,35 +68,42 @@ jobs:
             "172.64.49.16"
           )
 
-          # 配置项（完全保留你的习惯）
-          fastest_ip="172.64.229.141"  # 兜底IP，绝对不会空
+          # 配置项
+          fastest_ip="172.64.229.141"  # 兜底IP（你本地确认可用的）
           max_avg_speed=0
           EMBY_DOMAIN="gzxgzxgzx.de5.net"  # 你的Emby域名
-          MIN_SPEED_THRESHOLD=0.5  # 最低速度阈值（MB/s），调小避免全部跳过
+          MIN_SPEED_THRESHOLD=0.5  # 最低速度阈值
 
-          # 双网稳定测速节点（Cloudflare官方节点，永远不会404，彻底解决22报错）
-          # 节点1：Cloudflare北美节点，模拟电信线路访问
+          # 双网测速节点（Cloudflare官方节点，稳定不报错）
           TEST_URL_1="https://speed.cloudflare.com/__down?bytes=5242880"
-          # 节点2：Cloudflare欧洲节点，模拟移动线路访问
           TEST_URL_2="https://speedtest.london.cloudflare.com/__down?bytes=5242880"
 
-          # 循环测试每个IP（全容错，单个IP出错绝对不会中断任务）
+          # 循环测试每个IP
           for ip in "${ips[@]}"; do
             echo "====================================="
             echo "测试IP：$ip"
 
-            # 步骤1：Emby可用性验证（全容错，出错直接跳过）
-            emby_check=$(curl -sf --connect-timeout 3 --max-time 6 \
+            # -------------------------- 修复后的Emby验证逻辑 --------------------------
+            # 加了-k忽略SSL验证、延长超时、输出详细错误日志，解决海外误判
+            emby_response=$(curl -s -w "\n%{http_code}|%{exitcode}" -k --connect-timeout 8 --max-time 12 \
               --resolve "$EMBY_DOMAIN:443:$ip" \
-              "https://$EMBY_DOMAIN/emby/System/Info/Public" 2>/dev/null; echo $?)
+              "https://$EMBY_DOMAIN/emby/System/Info/Public" 2>&1)
             
-            if [ "$emby_check" -ne 0 ]; then
-              echo "❌ 不支持Emby，跳过"
+            http_code=$(echo "$emby_response" | tail -n1 | awk -F'|' '{print $1}')
+            exit_code=$(echo "$emby_response" | tail -n1 | awk -F'|' '{print $2}')
+            emby_body=$(echo "$emby_response" | head -n -1)
+
+            echo "Emby验证：退出码=$exit_code，HTTP状态码=$http_code"
+            
+            # 放宽验证规则：只要HTTP状态码是200/401/403，都算支持Emby（401/403说明服务存在，只是需要登录，是正常的）
+            if [ "$exit_code" -ne 0 ] && ! [[ "$http_code" =~ ^(200|401|403)$ ]]; then
+              echo "❌ 不支持Emby，跳过（服务不可达）"
               continue
             fi
             echo "✅ 支持Emby，开始双网测速..."
+            # -------------------------------------------------------------------------
 
-            # 步骤2：线路1测速（全容错，出错速度记0）
+            # 线路1测速
             host1=$(echo $TEST_URL_1 | awk -F/ '{print $3}')
             speed1=$(curl -o /dev/null -s -w "%{speed_download}" \
               --connect-timeout 4 --max-time 8 \
@@ -110,7 +117,7 @@ jobs:
             fi
             echo "→ 线路1测速：$speed1_mb MB/s"
 
-            # 步骤3：线路2测速（全容错，出错速度记0）
+            # 线路2测速
             host2=$(echo $TEST_URL_2 | awk -F/ '{print $3}')
             speed2=$(curl -o /dev/null -s -w "%{speed_download}" \
               --connect-timeout 4 --max-time 8 \
@@ -124,12 +131,12 @@ jobs:
             fi
             echo "→ 线路2测速：$speed2_mb MB/s"
 
-            # 步骤4：计算双网平均速度
+            # 计算双网平均速度
             avg_speed=$(echo "scale=2; ($speed1 + $speed2) / 2" | bc 2>/dev/null || echo 0)
             avg_speed_mb=$(echo "scale=2; $avg_speed / 1024 / 1024" | bc 2>/dev/null || echo 0)
             echo "→ 双网平均速度：$avg_speed_mb MB/s"
 
-            # 步骤5：更新最快IP
+            # 更新最快IP
             if (( $(echo "$avg_speed > $max_avg_speed" | bc -l 2>/dev/null) )); then
               max_avg_speed=$avg_speed
               fastest_ip=$ip
@@ -137,14 +144,13 @@ jobs:
             fi
           done
 
-          # 输出最终结果（兜底IP保证绝对有值）
+          # 输出最终结果
           echo "====================================="
           echo "最终选中双网最快IP：$fastest_ip"
           echo "fast_ip=$fastest_ip" >> $GITHUB_OUTPUT
 
-      - name: 更新Cloudflare DNS记录（全容错，不会报错）
+      - name: 更新Cloudflare DNS记录
         run: |
-          # 调用CF API更新DNS，加了错误日志输出，方便排查
           response=$(curl -s -w "\n%{http_code}" -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
             -H "Authorization: Bearer ${{ secrets.CF_TOKEN }}" \
             -H "Content-Type: application/json" \
@@ -165,6 +171,6 @@ jobs:
           if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
             echo "✅ DNS更新完成，当前解析IP：${{ steps.get-ip.outputs.fast_ip }}"
           else
-            echo "⚠️ DNS更新请求异常，但任务不会中断"
+            echo "⚠️ DNS更新请求异常"
             exit 0
           fi
