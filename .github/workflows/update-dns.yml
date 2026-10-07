@@ -1,124 +1,60 @@
 name: CF-DNS-Update-Emby
+
 on:
   schedule:
-    - cron: '*/30 * * * *'  # 每30分钟执行（UTC时间）
-  workflow_dispatch:        # 手动触发试运行
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'auto=GitHub自动测速更新; check=检查; scan=测速报告; apply_ip=应用指定IP'
+        required: true
+        default: auto
+        type: choice
+        options: [check, scan, apply_ip, auto]
+      selected_ip:
+        description: '仅 apply_ip 使用：填入在家里测速选出的 Cloudflare IPv4'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cf-dns-emby
+  cancel-in-progress: false
 
 jobs:
   update-dns:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: 安装基础工具（bc用于数值计算）
-        run: sudo apt update -y && sudo apt install -y bc || true
-
-      - name: 筛选最快且支持Emby的CF IP（显示测速数据）
-        id: get-ip
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: 测速与检查（错误立即停止，输出不含密钥）
+        shell: bash
+        env:
+          MODE: ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}
+          SELECTED_IP: ${{ inputs.selected_ip }}
+          CF_MEASUREMENT_LOCATION: github-hosted
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          CF_RECORD_ID: ${{ secrets.CF_RECORD_ID }}
         run: |
-          # 你的CF IP列表（2张图片IP全量新增+历史IP已完整去重）
-          ips=(
-            # 本次新增图片提取的全新IP
-            "172.64.149.222"
-            "108.162.198.89"
-            "172.64.144.253"
-            "172.64.52.15"
-            "172.64.156.121"
-            "172.64.34.19"
-            "172.64.38.29"
-            "172.64.35.5"
-            "162.159.62.25"
-            "162.159.49.168"
-            "162.159.38.196"
-            "172.64.229.157"
-            "162.159.39.99"
-            "172.64.52.228"
-            "172.64.53.250"
-            "162.159.45.118"
-            "108.162.198.150"
-            "172.64.152.156"
-            "172.64.42.0"
-            "172.64.229.141"
-            "162.159.58.102"
-            "172.64.151.95"
-            "172.64.146.239"
-            "172.64.154.158"
-            "172.64.149.46"
-            "172.64.35.83"
-            "162.159.40.28"
-            "162.159.61.225"
-            "108.162.196.35"
-            "162.159.46.151"
-            "162.159.41.38"
-            "172.64.146.223"
-            "172.64.147.176"
-            "162.159.40.235"
-            "172.64.229.166"
-            "162.159.49.16"
-            "162.159.58.200"
-            "172.64.156.225"
-            "172.64.151.49"
-            "162.159.40.50"
-            "108.162.194.37"
-            "172.64.49.55"
-            "162.159.41.172"
-            "172.64.229.241"
-            "162.159.40.171"
-            "162.159.61.226"
-            "172.64.48.117"
-            "172.64.32.230"
-            "162.159.43.213"
-            "172.64.49.16"
-          )
-          fastest_ip="172.64.229.141"  # 默认兜底IP
-          max_speed=0
-          EMBY_DOMAIN="gzxgzxgzx.de5.net"  # 你的Emby反代域名
-          
-          # 测速配置（CF官方5MB文件，确保网络稳定）
-          TEST_DOMAIN="speed.cloudflare.com"
-          TEST_FILE="https://${TEST_DOMAIN}/__down?bytes=5242880"  # 5MB=5242880字节
-
-          # 循环测试每个IP
-          for ip in "${ips[@]}"; do
-            echo "==== 测试IP: $ip ===="
-            # 步骤1：验证IP是否支持Emby（强制绑定IP解析域名）
-            emby_check=$(curl -s --connect-timeout 5 --max-time 10 \
-              --resolve "${EMBY_DOMAIN}:443:${ip}" \
-              "https://${EMBY_DOMAIN}/emby/System/Info/Public" > /dev/null; echo $?)
-            
-            if [ "$emby_check" -ne 0 ]; then
-              echo "→ Emby：不支持，跳过"
-              continue
-            fi
-            echo "→ Emby：支持"
-
-            # 步骤2：精准测速（修复curl语法，用引号包裹参数避免解析错误）
-            # 核心：--resolve参数放在URL前，所有变量用{}包裹，URL用引号包裹
-            speed=$(curl -o /dev/null -s -w "%{speed_download}" \
-              --connect-timeout 5 --max-time 10 \
-              --resolve "${TEST_DOMAIN}:443:${ip}" \
-              "${TEST_FILE}" || echo 0)
-
-            # 步骤3：转换速度单位（字节/秒 → MB/s，保留2位小数）
-            speed_mb=$(echo "scale=2; $speed / 1024 / 1024" | bc)
-            echo "→ 测速速度：$speed_mb MB/s（原始速度：$speed 字节/秒）"
-
-            # 步骤4：对比速度，更新最快IP
-            if (( $(echo "$speed > $max_speed" | bc -l) )); then
-              max_speed=$speed
-              fastest_ip=$ip
-              echo "→ 暂选为最快IP（速度超过之前最大值）"
-            fi
-          done
-
-          # 输出最终结果
-          echo "==== 最终结果 ===="
-          echo "选中最快IP：$fastest_ip"
-          echo "fast_ip=$fastest_ip" >> $GITHUB_OUTPUT
-
-      - name: 更新Cloudflare DNS记录
-        run: |
-          # 调用CF API更新DNS（单行JSON避免格式错误）
-          curl -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
-            -H "Authorization: Bearer ${{ secrets.CF_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"type\":\"A\",\"name\":\"gzxgzxgzx.de5.net\",\"content\":\"${{ steps.get-ip.outputs.fast_ip }}\",\"ttl\":1,\"proxied\":false}"
-          echo "DNS记录已更新为：${{ steps.get-ip.outputs.fast_ip }}"
+          set -euo pipefail
+          python3 --version
+          case "$MODE" in
+            check) python3 cf_dns.py --check-current ;;
+            scan) python3 cf_dns.py ;;
+            apply_ip)
+              if [ -z "$SELECTED_IP" ]; then
+                echo 'selected_ip 必填；DNS未更改。'
+                exit 1
+              fi
+              python3 cf_dns.py --apply --ip "$SELECTED_IP"
+              ;;
+            auto)
+              python3 cf_dns.py --apply
+              ;;
+            *) echo '未知模式；DNS未更改。'; exit 1 ;;
+          esac

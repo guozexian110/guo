@@ -1,0 +1,16 @@
+name: Test DNS safeguards
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    # Public pull requests must NEVER execute on the Muse/home runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest test_cf_dns -v
+      - run: python3 -m py_compile cf_dns.py
